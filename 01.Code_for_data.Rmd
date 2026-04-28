@@ -1,0 +1,813 @@
+# 000
+---
+title: "00.data"
+output: html_notebook
+editor_options: 
+  chunk_output_type: console
+---
+
+# library
+```{r}
+Sys.setenv(LANGUAGE = "en")
+options(warn = -1)
+memory.limit(size = 64670)
+library(Seurat)
+library(harmony)
+library(MAST)
+library(dplyr)
+library(tidyselect)
+library(RColorBrewer)
+library(future)
+library(ggplot2)
+library(org.Mm.eg.db)
+library(EnsDb.Mmusculus.v79)
+library(cowplot)
+library(data.table)
+library(clusterProfiler)
+#library(DoubletDecon)
+library(DoubletFinder)
+```
+
+# paralelization set 
+```{r}
+# plan("multiprocess", workers = 4)
+# options(future.globals.maxSize = 1024^4)
+# plan()
+# plan("sequential")
+```
+
+# theme set
+```{r}
+theme_set(theme_cowplot(font_size = 8))
+theme.text = theme_cowplot(font_size = 8)
+cols = c(brewer.pal(9, "Set1"),
+         brewer.pal(8, "Set2")[-c(2,4,8)],
+         brewer.pal(12, "Set3")[-9],
+         brewer.pal(12, "Paired"),
+         brewer.pal(8, "Dark2"),
+         brewer.pal(11, "Spectral")[-6],
+         brewer.pal(11, "BrBG")[-6]
+         )
+```
+
+# load data
+```{r}
+load("01.sct.dnt.Rdata")
+load("01.sct.nk.Rdata")
+load("01.sct.sp.Rdata")
+
+load("01.sct.kept.Rdata")
+
+load("01.harmony.dnt.nk.Rdata")
+load("01.harmony.dnt.nk.meta.Rdata")
+
+# load("01.harmony.dnt.Rdata")
+# load("01.harmony.dnt.cc.marker.Rdata")
+
+load("01.FindMarkers.between.DNT.and.CD4.CD8.NK.Rdata")
+load("01.FindMarkers.between.DNT.and.CD4.CD8.NK.join.Rdata")
+
+load("01.harmony.all.Rdata")
+load("01.harmony.all.meta.all.Rdata")
+
+load("01.cca.kept.Rdata")
+load("01.cca.kept.cc.marker.Rdata")
+load("01.cca.kept.cc.marker.48nk.Rdata")
+
+load("01.cca.unfilter.Rdata")
+load("01.cca.unfilter.meta.all.Rdata")
+
+# load("01.cc.marker.DNT.Rdata")
+# load("01.cca.kept.cc.marker.DNT.48nk.Rdata")
+
+load("01.nDNT.decon.Rdata")
+load("01.DoubletDecon.DoubletFinder.Rdata")
+
+load("01.trans.marker.Rdata")
+```
+
+# prepare data (sct)
+```{r}
+##### run sct #####
+sct = mapply(function(sample, data.dir){
+    print(paste("Preparing", sample))
+    ##### read the 10x files of different formats #####
+    if (sample %in% c("CD4", "CD8", "TCRab", "nDNT_rep1", "nDNT_rep2", "aDNT_rep1", "aDNT_rep2")) 
+      {
+      sct = Read10X(data.dir = data.dir)
+      } 
+    else if (sample %in% c("NK_sp1", "NK_sp2", "NK_sp3")) 
+      {
+      sct = data.table::fread(file = list.files(data.dir, full.names = T), header = "auto", sep = ",") %>%
+      tibble::column_to_rownames("V1")
+      } 
+    else if (sample %in% c("sp3_rep1", "sp3_rep2", "sp4_rep1", "sp4_rep2"))
+      {
+      sct = data.table::fread(file = data.dir, header = "auto", sep = ",") %>%
+      dplyr::mutate(SYMBOL = AnnotationDbi::mapIds(x = EnsDb.Mmusculus.v79, keys = V1, column = "SYMBOL", keytype = "GENEID")) %>%
+      na.omit() %>%
+      dplyr::filter(!SYMBOL == "") %>%
+      dplyr::select(-V1)
+      dup = sct$SYMBOL[duplicated(sct$SYMBOL)]
+      z1 = sct %>%
+      dplyr::filter(SYMBOL %in% dup) %>%
+      dplyr::group_by(SYMBOL) %>%
+      dplyr::summarise_all(sum)
+      # long time, but should work
+      z2 = sct %>%
+      dplyr::filter(!SYMBOL %in% dup)
+      sct = rbind(z1, z2) %>%
+      tibble::column_to_rownames("SYMBOL")
+      }
+    print(head(sct[,1:5]))
+    print(head(sct[,(ncol(sct) - 5):ncol(sct)]))
+    
+    ##### create the seurat objects #####
+    sct = sct %>%
+    CreateSeuratObject(project = sample) %>%
+    PercentageFeatureSet(pattern = "^mt-", col.name = "percent.mt") %>%
+    RenameCells(add.cell.id = sample)
+    print(dim(sct)) # print the cell number before qc
+    
+    ##### subset the seurat objects #####
+    sct = subset(sct, subset = percent.mt < 10 & nFeature_RNA > 500)
+    print(dim(sct)) # print the cell number after qc
+    print(median(sct$nCount_RNA)) # print the median UMIs after qc
+    print(max(sct$nCount_RNA)) # print the max UMIs after qc
+    
+    ##### scale each samples #####
+    sct = SCTransform(object = sct, 
+                    vars.to.regress = "percent.mt", 
+                    verbose = F,
+                    conserve.memory = T )
+    
+    return(sct)
+    }, 
+  sample = c(list.files(path = "../data/")), 
+  data.dir = c(list.files(path = "../data/", full.names = T)),
+  SIMPLIFY = F)
+
+##### split and save the sct files #####
+sct.dnt = sct[1:7]
+sct.nk = sct[8:10]
+sct.sp = sct[11:14]
+save(sct.dnt, file = "../result/01.sct.dnt.Rdata")
+save(sct.nk,  file = "../result/01.sct.nk.Rdata")
+save(sct.sp,  file = "../result/01.sct.sp.Rdata")
+rm(sct)
+gc()
+
+##### sct.kept #####
+sct.kept = mapply(function(sct, sample){
+    DefaultAssay(sct) = "RNA"
+    print(paste("Preparing", sample))
+    ###### subset ######
+    if (sample %in% c("nDNT_rep1", "nDNT_rep2", "aDNT_rep1", "aDNT_rep2")) 
+      {
+      sct.kept = subset(x = sct,
+                        subset = (Cd3d>0|Cd3e>0|Cd3g>0)&Cd4==0&Cd8b1==0&Klrb1c==0,
+                        slot = "counts")### layer data ###
+      } 
+    else if (sample %in% "CD4") 
+      {
+      sct.kept = subset(x = sct, subset = (Cd3d>0|Cd3e>0|Cd3g>0)&Cd8a==0&Cd8b1==0&Klrb1c==0 )
+      } 
+    else if (sample %in% "CD8") 
+      {
+      sct.kept = subset(x = sct, subset = (Cd3d>0|Cd3e>0|Cd3g>0)&Cd4==0&Klrb1c==0 )
+      }
+    else if (sample %in% "TCRab") 
+      {
+      sct.kept = subset(x = sct, subset = (Cd3d>0|Cd3e>0|Cd3g>0) )
+      } 
+    else if (sample %in% c("NK_sp1", "NK_sp2", "NK_sp3")) 
+      {
+      sct.kept = subset(x = sct, subset = Cd3d == 0 & Cd3g == 0)
+      }
+    ######
+    sct.kept = SCTransform(object = sct.kept, 
+                         vars.to.regress = "percent.mt", 
+                         verbose = F,
+                         conserve.memory = F )
+    ######
+    return(sct.kept)}, 
+  sct = c(sct.dnt, sct.nk), 
+  sample = c(names(sct.dnt), names(sct.nk)),
+  SIMPLIFY = F)
+
+save(sct.kept, file = "../result/01.sct.kept.Rdata")
+```
+
+# harmony CD4 CD8 NK DNT kept cells
+```{r run CD4 CD8 NK DNT harmony}
+##### merge the sct files #####
+harmony.dnt.nk = merge(x = sct.kept$aDNT_rep1, y = sct.kept[2:10])
+rm(sct.kept)
+gc()
+plan("sequential")
+harmony.dnt.nk = harmony.dnt.nk %>%
+  SCTransform(vars.to.regress = "percent.mt", conserve.memory = F) %>% 
+  # take a lot memory, about 40 min.
+  RunPCA(verbose = F)
+##### change the core #####
+plan("multiprocess", workers = 4)
+options(future.globals.maxSize = 1024^4)
+##### set the batch #####
+table(harmony.dnt.nk$orig.ident)
+harmony.dnt.nk$batch = factor(
+  harmony.dnt.nk$orig.ident,
+  labels = c("b1", "b2", rep("b1", 3), "b2", rep("b3", 3), "b1"))
+table(harmony.dnt.nk$batch, harmony.dnt.nk$orig.ident)
+##### run the harmony #####
+harmony.dnt.nk = harmony.dnt.nk %>%
+  RunHarmony(group.by.vars = "batch", assay.use = "SCT") %>%
+  RunUMAP(dims = 1:30, reduction = "harmony") %>%
+  FindNeighbors(dims = 1:30, reduction = "harmony") %>%
+  FindClusters(resolution = .1)
+##### set idents to be celltype #####
+harmony.dnt.nk$celltype = sub("(_rep[1-2])|(_sp[1-3])", "", harmony.dnt.nk$orig.ident)
+harmony.dnt.nk$celltypesplit = sub("_sp[1-3]", "", harmony.dnt.nk$orig.ident)
+table(harmony.dnt.nk$celltype)
+table(harmony.dnt.nk$celltypesplit)
+Idents(harmony.dnt.nk) = "celltype"
+##### ScaleData for findmarkers #####
+plan("sequential")
+DefaultAssay(harmony.dnt.nk) = "RNA"
+harmony.dnt.nk = harmony.dnt.nk %>%
+  NormalizeData(., normalization.method = "LogNormalize", scale.factor = 10000) %>%
+  FindVariableFeatures(., selection.method = "vst", nfeatures = 2000) %>%
+  ScaleData(., vars.to.regress = "percent.mt")
+##### save the results #####
+save(harmony.dnt.nk, file = "01.harmony.dnt.nk.Rdata")
+```
+## markers
+```{r}
+object = harmony.dnt.nk
+##### FindMarkers between DNT and CD4, CD8, NK respectively #####
+markers = mapply(function(ident.1, ident.2){
+  FindMarkers(object = object, ident.1 = ident.1, ident.2 = ident.2, group.by = "celltypesplit", assay = "RNA", slot = "data", only.pos = T) %>%
+    tibble::rownames_to_column("gene") %>%
+    dplyr::mutate(type = paste(ident.1, "vs", ident.2, sep = ".")) %>%
+    dplyr::arrange(desc(avg_logFC))
+},
+ident.1 = rep(c("nDNT_rep1", "nDNT_rep2", "aDNT_rep1", "aDNT_rep2"), 3), 
+ident.2 = rep(c("CD4", "CD8", "NK"), c(4, 4, 4)),
+SIMPLIFY = F, USE.NAMES = F)
+names(markers) = paste(rep(c("nDNT_rep1", "nDNT_rep2", "aDNT_rep1", "aDNT_rep2"), 3), "vs", rep(c("CD4", "CD8","NK"), c(4,4,4)), sep = ".")
+##### save results #####
+save(markers, file = "01.FindMarkers.between.DNT.and.CD4.CD8.NK.Rdata")
+##### join the replication result #####
+genelist = list(
+  nDNT.vs.CD4 = intersect(markers$nDNT_rep1.vs.CD4$gene, markers$nDNT_rep2.vs.CD4$gene),
+  nDNT.vs.CD8 = intersect(markers$nDNT_rep1.vs.CD8$gene, markers$nDNT_rep2.vs.CD8$gene),
+  nDNT.vs.NK  = intersect(markers$nDNT_rep1.vs.NK$gene,  markers$nDNT_rep2.vs.NK$gene ),
+  aDNT.vs.CD4 = intersect(markers$aDNT_rep1.vs.CD4$gene, markers$aDNT_rep2.vs.CD4$gene),
+  aDNT.vs.CD8 = intersect(markers$aDNT_rep1.vs.CD8$gene, markers$aDNT_rep2.vs.CD8$gene),
+  aDNT.vs.NK  = intersect(markers$aDNT_rep1.vs.NK$gene,  markers$aDNT_rep2.vs.NK$gene )
+                )
+markers.both = mapply(function(ident.1, ident.2){
+  FindMarkers(object = object, ident.1 = ident.1, ident.2 = ident.2, group.by = "celltype", assay = "RNA", slot = "data", only.pos = T) %>%
+    tibble::rownames_to_column("gene") %>%
+    dplyr::mutate(type = paste(ident.1, "vs", ident.2, sep = ".")) %>%
+    dplyr::arrange(desc(avg_logFC))
+}, 
+ident.1 = rep(c("nDNT", "aDNT"),    3), 
+ident.2 = rep(c("CD4", "CD8","NK"), c(2,2,2)),
+SIMPLIFY = F, USE.NAMES = F)
+names(markers.both) = paste(rep(c("nDNT", "aDNT"), 3), "vs", rep(c("CD4", "CD8","NK"),c(2,2,2)), sep = ".")
+markers.join = lapply(names(markers.both), function(i){
+  markers.both[[i]] %>% 
+    dplyr::filter(gene %in% genelist[[i]])
+})
+names(markers.join) = names(markers.both)
+##### save results #####
+save(genelist, markers.both, markers.join, 
+     file = "01.FindMarkers.between.DNT.and.CD4.CD8.NK.join.Rdata")
+##### write the csv #####
+rbind(markers.join$nDNT.vs.CD4, markers.join$nDNT.vs.CD8, markers.join$nDNT.vs.NK) %>%
+  write.csv(file = "TableS2.nDNT.vs.CD4.CD8.NK.csv", x = ., row.names = F)
+rbind(markers.join$aDNT.vs.CD4, markers.join$aDNT.vs.CD8, markers.join$aDNT.vs.NK) %>%
+  write.csv(file = "TableS3.aDNT.vs.CD4.CD8.NK.csv", x = ., row.names = F)
+##### 
+```
+# harmony DNT kept cells
+```{r run nDNT, aDNT harmony [NOT USED]}
+names(sct.kept)
+plan("sequential")
+harmony.dnt = mapply(function(i, j, lambda, theta, resolution){
+  ##### run the harmony #####
+  object = merge(i, j) %>%
+    SCTransform(vars.to.regress = "percent.mt", conserve.memory = F) %>% 
+    RunPCA(verbose = F) %>%
+    RunHarmony(group.by.vars = "orig.ident", assay.use = "SCT",
+               lambda = lambda, theta = theta) %>%
+    RunUMAP(dims = 1:30, reduction = "harmony") %>%
+    FindNeighbors(dims = 1:30, reduction = "harmony") %>%
+    FindClusters(resolution = resolution)
+  ##### ScaleData for findmarkers #####
+  DefaultAssay(object) = "RNA"
+  object = object %>%
+    NormalizeData(., normalization.method = "LogNormalize", scale.factor = 10000) %>%
+    FindVariableFeatures(., selection.method = "vst", nfeatures = 2000) %>%
+    ScaleData(., vars.to.regress = "percent.mt")
+  ##### return object #####
+  return(object)
+}, SIMPLIFY = F, 
+i = list("nDNT" = sct.kept$nDNT_rep1, "aDNT" = sct.kept$aDNT_rep1), 
+j = list("nDNT" = sct.kept$nDNT_rep2, "aDNT" = sct.kept$aDNT_rep2), 
+lambda = c(1, .05), 
+theta = c(2, 3), 
+resolution = c(.05, .01))
+##### run the harmony of naDNT #####
+# harmony.naDNT = merge(sct.kept$aDNT_rep1, sct.kept[c(2,5:6)]) %>%
+#     SCTransform(vars.to.regress = "percent.mt", conserve.memory = F) %>% 
+#     RunPCA(verbose = F)
+# harmony.naDNT$batch = sub("[n|a]DNT_", "", harmony.naDNT$orig.ident)
+# table(harmony.naDNT$batch, harmony.naDNT$orig.ident)
+# harmony.naDNT = harmony.naDNT %>%
+#     RunHarmony(group.by.vars = "batch", assay.use = "SCT") %>%
+#     RunUMAP(dims = 1:30, reduction = "harmony") %>%
+#     FindNeighbors(dims = 1:30, reduction = "harmony") %>%
+#     FindClusters(resolution = .1)
+# DimPlot(harmony.naDNT, split.by = "orig.ident", ncol = 2, label = T, cols = "Paired")
+# FeaturePlot(harmony.naDNT, c("Il17a","Cxcr6", "Eomes", "Gzmb", "Cd74"), order = T,label = T)
+##### save the results #####
+save(harmony.dnt, file = "01.harmony.dnt.Rdata")
+```
+## markers
+```{r [NOT USED]}
+cc.marker = mapply(function(object){
+  lapply(sort(unique(object$seurat_clusters)), function(i){
+    if (min(table(object$orig.ident[object$seurat_clusters == i])) > 30) {
+      FindConservedMarkers(object, ident.1 = i, grouping.var = "orig.ident", 
+                           assay = "RNA", slot = "data", only.pos = T) %>%
+        tibble::rownames_to_column("gene") %>%
+        dplyr::filter(max_pval < .05 & minimump_p_val < .05) %>%
+        dplyr::mutate(cluster = i)
+    }}) %>% 
+    data.table::rbindlist() %>%
+    dplyr::left_join(y = FindAllMarkers(object, assay = "RNA", slot = "data", only.pos = T), by = c("cluster", "gene")) %>%
+    dplyr::arrange(desc(avg_logFC))
+}, object = harmony.dnt, SIMPLIFY = F)
+names(cc.marker)
+save(cc.marker, file = "01.harmony.dnt.cc.marker.Rdata")
+```
+### 48nk.marker
+```{r [NOT USED]}
+object = harmony.dnt.nk
+head(harmony.dnt$nDNT@meta.data)
+df1 = rbind(harmony.dnt$nDNT@meta.data %>% tibble::rownames_to_column("cells") %>% dplyr::select(cells, seurat_clusters_before = seurat_clusters),
+            harmony.dnt$aDNT@meta.data %>% tibble::rownames_to_column("cells") %>% dplyr::select(cells, seurat_clusters_before = seurat_clusters))
+table(df1$seurat_clusters)
+head(df1)
+df2 = cca.kept$DNT@meta.data %>% tibble::rownames_to_column("cells") %>% dplyr::select(cells, integrated_snn_res.0.01)
+table(df2$integrated_snn_res.0.01)
+meta = object@meta.data %>%
+  tibble::rownames_to_column("cells") %>%
+  dplyr::left_join(y = df1, by = "cells") %>%
+  dplyr::left_join(y = df2, by = "cells") %>%
+  tibble::column_to_rownames("cells")
+head(meta)
+meta$cluster = paste0(meta$celltype, meta$seurat_clusters_before) %>% sub("NA", "", .) %>%
+  factor(., levels = c(paste0("nDNT", 0:4), paste0("aDNT", 0:1), "CD4", "CD8", "NK", "TCRab"))
+table(meta$cluster)
+meta$recluster = paste0(sub("^[n|a]", "", meta$celltype), meta$integrated_snn_res.0.01) %>% sub("NA", "", .) %>%
+  factor(., levels = c(paste0("DNT", 0:1), "CD4", "CD8", "NK", "TCRab"))
+table(meta$recluster)
+save(meta, file = "01.harmony.dnt.nk.meta1.Rdata")
+
+# object@meta.data = meta
+# cc.marker.48nk = mapply(function(ident.1, group.by, cc.marker){
+#   
+#   x = mapply(function(ident.2){
+#     FindMarkers(object, ident.1, ident.2, group.by = group.by, only.pos = T, assay = "RNA", slot = "data",
+#                 features = cc.marker) %>%
+#       tibble::rownames_to_column("gene") %>%
+#       dplyr::filter(p_val_adj < .05)
+#   }, SIMPLIFY = F,
+#   ident.2 = c("CD4", "CD8", "NK"))
+#   dplyr::inner_join(x$CD4, x$CD8, by = "gene", suffix = c(".CD4", ".CD8")) %>%
+#     dplyr::inner_join(., x$NK, by = "gene", suffix = c("", ".NK")) %>%
+#     dplyr::mutate(type = ident.1)
+#   
+# }, SIMPLIFY = F, 
+# ident.1 = c(paste0("nDNT",0:4), paste0("aDNT",0:1), paste0("DNT",0:1)),
+# group.by = c(rep("cluster",7), rep("recluster",2)),
+# cc.marker = sapply(cc.marker, function(i){
+#   sapply(sort(unique(i$cluster)), function(j){
+#     (i %>% dplyr::filter(cluster == j))$gene
+#     })
+#   }) %>% 
+#   unlist(., recursive = F)) %>%
+#   data.table::rbindlist()
+# head(cc.marker.48nk)
+# save(cc.marker.48nk, file = "01.cca.kept.cc.marker.48nk.Rdata")
+```
+# harmony all
+```{r run harmony all}
+##### merge sct files #####
+harmony.all = merge(x = sct.dnt$aDNT_rep1, y = c(sct.dnt[2:7], sct.nk, sct.sp))
+rm(sct.dnt, sct.nk, sct.sp)
+gc()
+plan("sequential")
+harmony.all = harmony.all %>%
+  SCTransform(vars.to.regress = "percent.mt", conserve.memory = F) %>% 
+  # take a lot memory, about 40 min.
+  RunPCA(verbose = F)
+##### change the core #####
+plan("multiprocess", workers = 4)
+options(future.globals.maxSize = 1024^4)
+##### set the batch #####
+table(harmony.all$orig.ident)
+harmony.all$batch = factor(
+  harmony.all$orig.ident,
+  labels = c("b1", "b2", rep("b1", 3), "b2", rep("b3", 3), rep("b4", 4), "b1"))
+table(harmony.all$batch, harmony.all$orig.ident)
+##### run the harmony #####
+harmony.all@meta.data = meta.all
+harmony.all = RunHarmony(object = harmony.all, group.by.vars = "batch", assay.use = "SCT", lambda = .1, theta = 3) %>%
+  RunUMAP(dims = 1:30, reduction = "harmony") %>%
+  FindNeighbors(dims = 1:30, reduction = "harmony") %>%
+  FindClusters(resolution = .1)
+DimPlot(harmony.all, group.by = "celltype.converge", label = T, cols = cols)
+##### set idents to be celltype #####
+harmony.all$celltype = factor(
+  harmony.all$orig.ident,
+  labels = c("aDNT", "aDNT", "CD4", "CD8", "nDNT", "nDNT",
+             rep("NK", 3),
+             rep("sp", 4),
+             "TCRab"))
+harmony.all$celltypesplit = factor(
+  harmony.all$orig.ident,
+  labels = c("aDNT_rep1", "aDNT_rep2", "CD4", "CD8", "nDNT_rep1", "nDNT_rep2",
+             rep("NK", 3),
+             rep("sp", 4),
+             "TCRab"))
+table(harmony.all$celltype)
+table(harmony.all$celltypesplit)
+Idents(harmony.all) = "celltype"
+##### ScaleData for findmarkers #####
+plan("sequential")
+DefaultAssay(harmony.all) = "RNA"
+harmony.all = harmony.all %>%
+  NormalizeData(., normalization.method = "LogNormalize", scale.factor = 10000) %>%
+  FindVariableFeatures(., selection.method = "vst", nfeatures = 2000) %>%
+  ScaleData(., vars.to.regress = "percent.mt")
+##### save the results #####
+save(harmony.all, file = "01.harmony.all.Rdata")
+```
+```{r modify harmony all metadata}
+##### save the pre metadata #####
+metapre = harmony.all@meta.data
+save(metapre, file = "01.harmony.all.metapre.Rdata")
+##### import the markers from plos dataset #####
+plos.meta1 = fread(input = "../01.processed_data/mouse_spleen_2019_plos.biology/other information/pbio.3000528.s013.csv") # Mouse spleen scRNA-seq clustering data.
+##### modify the plos metadata #####
+meta.plos = mapply(function(i, j){
+  plos.meta1[grep(i, plos.meta1$cell), ] %>%
+    dplyr::mutate(cell.rename = paste(j, cell, sep = "_"))
+  },
+  i = c("mouse_3.1", "mouse_3.2", "mouse_4.1", "mouse_4.2"), 
+  j = c("sp3_rep1", "sp3_rep2", "sp4_rep1", "sp4_rep2"),
+  SIMPLIFY = F) %>% 
+  rbindlist() %>%
+  dplyr::mutate(converged.cell.type.simple = sub(".[1-4]$", "", converged.cell.type)) %>%
+  dplyr::select(cell.rename, converged.cell.type.simple)
+head(meta.plos)
+colnames(meta.plos)
+table(meta.plos$converged.cell.type.simple)
+##### gene expression #####
+DefaultAssay(harmony.all) = "RNA"
+meta.gene = FetchData(object = harmony.all, c("Cd3d", "Cd3e", "Cd3g", "Cd4", "Cd8a", "Cd8b1", "Klrb1c"), slot = "data") %>%
+  tibble::rownames_to_column("cell.rename")
+head(meta.gene)
+##### merge the pre metadata with DNT and plos metadata #####
+meta.all = metapre %>%
+  tibble::rownames_to_column("cell.rename") %>%
+  # dplyr::left_join(y = meta.DNT,  by = c("cell.rename")) %>%
+  dplyr::left_join(y = meta.plos, by = c("cell.rename")) %>%
+  dplyr::left_join(y = meta.gene, by = c("cell.rename")) %>%
+  tibble::column_to_rownames("cell.rename")
+head(meta.all)
+##### put celltype inside converged.cell.type.simple #####
+meta.all$converged.cell.type.simple[is.na(meta.all$converged.cell.type.simple)] =
+  as.character(meta.all$celltypesplit)[is.na(meta.all$converged.cell.type.simple)]
+table(meta.all$converged.cell.type.simple)
+##### celltype.converge #####
+meta.all$celltypesplit.converge = sub("_rep[1|2]", "", meta.all$converged.cell.type.simple)
+meta.all$celltype.converge = sub("_rep[1|2].*", "", meta.all$converged.cell.type.simple)
+table(meta.all$celltypesplit.converge)
+table(meta.all$celltype.converge)
+##### T identity #####
+meta.all$Tid = (meta.all$Cd3d > 0 |meta.all$Cd3e > 0| meta.all$Cd3g > 0) & 
+  meta.all$celltype.converge %in% c("aDNT", "CD4", "CD8", "nDNT", "TCRab",
+                                    "Memory-CD4-T-cell", "Memory-CD8-T-cell",
+                                    "Naive-CD4-T-cell", "Naive-CD8-T-cell",
+                                    "NK-T-cell")
+table(meta.all$Tid, meta.all$celltype.converge)
+
+meta.all$CD4id = (meta.all$Cd3d > 0 |meta.all$Cd3e > 0| meta.all$Cd3g > 0) &
+  meta.all$Cd8a == 0 & meta.all$Cd8b1 == 0 & meta.all$Klrb1c == 0 &
+  meta.all$celltype.converge %in% c("CD4",
+                                    "Memory-CD4-T-cell",
+                                    "Naive-CD4-T-cell")
+table(meta.all$CD4id, meta.all$celltype.converge)
+
+meta.all$CD8id = (meta.all$Cd3d > 0 |meta.all$Cd3e > 0| meta.all$Cd3g > 0) &
+  meta.all$Cd4 == 0 & meta.all$Klrb1c == 0 & 
+  meta.all$celltype.converge %in% c("CD8",
+                                    "Memory-CD8-T-cell",
+                                    "Naive-CD8-T-cell")
+table(meta.all$CD8id, meta.all$celltype.converge)
+
+meta.all$DNTid = (meta.all$Cd3d > 0 |meta.all$Cd3e > 0| meta.all$Cd3g > 0) &
+  meta.all$Cd4 == 0 & meta.all$Klrb1c == 0 & meta.all$Cd8b1 == 0 &
+  meta.all$celltype.converge %in% c("aDNT", "nDNT")
+table(meta.all$DNTid, meta.all$celltype.converge)
+
+meta.all$NKid = (meta.all$Cd3d == 0 & meta.all$Cd3g == 0) &
+   meta.all$celltype.converge %in% c("NK", "NK-cell")
+table(meta.all$NKid, meta.all$celltype.converge)
+
+meta.all$contaminate = (meta.all$Tid == FALSE & 
+  meta.all$celltype.converge %in% c("aDNT", "CD4", "CD8", "nDNT", "TCRab",
+                                    "Memory-CD4-T-cell", "Memory-CD8-T-cell",
+                                    "Naive-CD4-T-cell", "Naive-CD8-T-cell",
+                                    "NK-T-cell")) |
+  (meta.all$CD4id == FALSE &
+  meta.all$celltype.converge %in% c("CD4",
+                                    "Memory-CD4-T-cell",
+                                    "Naive-CD4-T-cell")) |
+  (meta.all$CD8id == FALSE & 
+  meta.all$celltype.converge %in% c("CD8",
+                                    "Memory-CD8-T-cell",
+                                    "Naive-CD8-T-cell")) |
+  (meta.all$DNTid == FALSE & 
+  meta.all$celltype.converge %in% c("aDNT", "nDNT")) |
+  (meta.all$NKid == FALSE &
+  meta.all$celltype.converge %in% c("NK", "NK-cell"))
+table(meta.all$contaminate, meta.all$celltype.converge)
+##### save modified metadata #####
+save(meta.all, file = "01.harmony.all.meta.all.Rdata")
+
+```
+# cca kept
+```{r}
+plan("sequential")
+cca.kept = mapply(function(object.list){
+  anchor.features = SelectIntegrationFeatures(object.list = object.list, 
+                                              nfeatures = 3000) 
+  object.integrated = PrepSCTIntegration(object.list = object.list, 
+                                         anchor.features = anchor.features) %>%
+    lapply(FUN = RunPCA, features = anchor.features, verbose = F) %>%
+    FindIntegrationAnchors(object.list = ., 
+                           reduction = "rpca",
+                           anchor.features = anchor.features, 
+                           normalization.method = "SCT",
+                           reference = 1) %>% # long time
+    IntegrateData(anchorset = ., 
+                  normalization.method = "SCT") %>%
+    RunPCA(object = .) %>%
+    RunUMAP(object = ., 
+            dims = 1:30) %>%
+    FindNeighbors(dims = 1:30) %>%
+    FindClusters(resolution = .05)
+  ##### scale for finding markers #####
+  DefaultAssay(object.integrated) = "RNA"
+  object.integrated = NormalizeData(object.integrated,
+                                    normalization.method = "LogNormalize",
+                                    scale.factor = 10000)
+  object.integrated = FindVariableFeatures(object.integrated,
+                                           selection.method = "vst",
+                                           nfeatures = 2000)
+  object.integrated = ScaleData(object.integrated,
+                                vars.to.regress = "percent.mt")
+  return(object.integrated)
+}, 
+object.list = list("nDNT" = sct.kept[5:6], "aDNT" = sct.kept[1:2], "DNT" = sct.kept[c(5:6, 1:2)]), SIMPLIFY = F)
+DefaultAssay(cca.kept$DNT) = "integrated"
+cca.kept$DNT = FindClusters(cca.kept$DNT, resolution = .01)
+save(cca.kept, file = "01.cca.kept.Rdata")
+```
+## markers
+```{r}
+cc.marker = mapply(function(object){
+  print(table(object$seurat_clusters, object$orig.ident))
+  lapply(sort(unique(object$seurat_clusters)), function(i){
+    if (min(table(object$orig.ident[object$seurat_clusters == i])) > 30){
+      FindConservedMarkers(object, ident.1 = i, grouping.var = "orig.ident", 
+                           assay = "RNA", slot = "data", only.pos = T) %>%
+        tibble::rownames_to_column("gene") %>%
+        dplyr::filter(max_pval < .05 & minimump_p_val < .05) %>%
+        dplyr::mutate(cluster = i)
+    }}) %>% 
+    data.table::rbindlist() %>%
+    dplyr::left_join(y = FindAllMarkers(object, assay = "RNA", slot = "data", only.pos = T), by = c("cluster", "gene")) %>%
+    dplyr::group_by(cluster) %>%
+    dplyr::arrange(desc(avg_logFC), .by_group = T)
+}, object = cca.kept, SIMPLIFY = F)
+names(cc.marker)
+save(cc.marker, file = "01.cca.kept.cc.marker.Rdata")
+```
+### 48nk.marker
+```{r}
+object = harmony.dnt.nk
+# df1 = rbind(cca.kept$nDNT@meta.data %>% tibble::rownames_to_column("cells") %>% dplyr::select(cells, integrated_snn_res.0.05), 
+#             cca.kept$aDNT@meta.data %>% tibble::rownames_to_column("cells") %>% dplyr::select(cells, integrated_snn_res.0.05))
+# table(df1$integrated_snn_res.0.05)
+# head(df1)
+# df2 = cca.kept$DNT@meta.data %>% tibble::rownames_to_column("cells") %>% dplyr::select(cells, integrated_snn_res.0.01)
+# table(df2$integrated_snn_res.0.01)
+# meta = object@meta.data %>%
+#   tibble::rownames_to_column("cells") %>%
+#   dplyr::left_join(y = df1, by = "cells") %>%
+#   dplyr::left_join(y = df2, by = "cells") %>%
+#   tibble::column_to_rownames("cells")
+# head(meta)
+# meta$cluster = paste0(meta$celltype, meta$integrated_snn_res.0.05) %>% sub("NA", "", .) %>%
+#   factor(., levels = c(paste0("nDNT", 0:4), paste0("aDNT", 0:1), "CD4", "CD8", "NK", "TCRab"))
+# table(meta$cluster)
+# meta$recluster = paste0(sub("^[n|a]", "", meta$celltype), meta$integrated_snn_res.0.01) %>% sub("NA", "", .) %>%
+#   factor(., levels = c(paste0("DNT", 0:1), "CD4", "CD8", "NK", "TCRab"))
+# table(meta$recluster)
+# save(meta, file = "01.harmony.dnt.nk.meta.Rdata")
+
+object@meta.data = meta
+cc.marker.48nk = mapply(function(ident.1, group.by, cc.marker){
+  
+  x = mapply(function(ident.2){
+    FindMarkers(object, ident.1, ident.2, group.by = group.by, only.pos = T, assay = "RNA", slot = "data",
+                features = cc.marker) %>%
+      tibble::rownames_to_column("gene") %>%
+      dplyr::filter(p_val_adj < .05)
+  }, SIMPLIFY = F,
+  ident.2 = c("CD4", "CD8", "NK"))
+  dplyr::inner_join(x$CD4, x$CD8, by = "gene", suffix = c(".CD4", ".CD8")) %>%
+    dplyr::inner_join(., x$NK, by = "gene", suffix = c("", ".NK")) %>%
+    dplyr::mutate(type = ident.1)
+  
+}, SIMPLIFY = F, 
+ident.1 = c(paste0("nDNT",0:4), paste0("aDNT",0:1), paste0("DNT",0:1)),
+group.by = c(rep("cluster",7), rep("recluster",2)),
+cc.marker = sapply(cc.marker, function(i){
+  sapply(sort(unique(i$cluster)), function(j){
+    (i %>% dplyr::filter(cluster == j))$gene
+    })
+  }) %>% 
+  unlist(., recursive = F)) %>%
+  data.table::rbindlist()
+head(cc.marker.48nk)
+save(cc.marker.48nk, file = "01.cca.kept.cc.marker.48nk.Rdata")
+```
+### up and downregulate
+```{r}
+object = cca.kept$DNT
+object$celltype = sub("_rep[1|2]", "", object$orig.ident) %>% factor(., levels = c("nDNT", "aDNT"))
+table(object$integrated_snn_res.0.01, object$orig.ident)
+DefaultAssay(object) = "RNA"
+df = mapply(function(ident.1, ident.2, subset.ident){
+  x = FindMarkers(object, ident.1 = ident.1, ident.2 = ident.2, subset.ident = subset.ident, 
+                  group.by = "orig.ident", assay = "RNA", slot = "data") %>%
+    tibble::rownames_to_column("gene") %>%
+    dplyr::filter(p_val_adj < .05) %>%
+    dplyr::mutate(type = paste0(ident.1,".vs.",ident.2), trans = avg_logFC > 0) %>%
+    dplyr::arrange(desc(avg_logFC))
+  x$trans = factor(x$trans, labels = c("down", "up"))
+  return(x)
+}, 
+ident.1 = rep(paste0("aDNT_rep",1:2),2),
+ident.2 = rep(paste0("nDNT_rep",1:2),2),
+subset.ident = c(0,0,1,1), 
+SIMPLIFY = F)
+head(df[[1]])
+trans.marker = mapply(function(df){
+  x = dplyr::inner_join(df[[1]], df[[2]], by = c("gene", "trans"), suffix = c(".rep1", ".rep2"))
+}, SIMPLIFY = F, df = list("DNT0" = df[1:2], "DNT1" = df[3:4]))
+head(trans.marker[[1]])
+save(trans.marker, file = "01.trans.marker.Rdata")
+```
+# cca unfilter
+```{r}
+plan("sequential")
+names(sct.dnt)
+cca.unfilter = mapply(function(object.list){
+  anchor.features = SelectIntegrationFeatures(object.list = object.list, 
+                                              nfeatures = 3000) 
+  object.integrated = PrepSCTIntegration(object.list = object.list, 
+                                         anchor.features = anchor.features) %>%
+    lapply(FUN = RunPCA, features = anchor.features, verbose = F) %>%
+    FindIntegrationAnchors(object.list = ., 
+                           reduction = "rpca",
+                           anchor.features = anchor.features, 
+                           normalization.method = "SCT",
+                           reference = 1) %>% # long time
+    IntegrateData(anchorset = ., 
+                  normalization.method = "SCT") %>%
+    RunPCA(object = .) %>%
+    RunUMAP(object = ., 
+            dims = 1:30) %>%
+    FindNeighbors(dims = 1:30) %>%
+    FindClusters(resolution = .05)
+  ##### scale for finding markers #####
+  DefaultAssay(object.integrated) = "RNA"
+  object.integrated = NormalizeData(object.integrated,
+                                    normalization.method = "LogNormalize",
+                                    scale.factor = 10000)
+  object.integrated = FindVariableFeatures(object.integrated,
+                                           selection.method = "vst",
+                                           nfeatures = 2000)
+  object.integrated = ScaleData(object.integrated,
+                                vars.to.regress = "percent.mt")
+  return(object.integrated)
+}, 
+object.list = list("nDNT" = sct.dnt[5:6], "aDNT" = sct.dnt[1:2], "DNT" = sct.dnt[c(5:6, 1:2)]), SIMPLIFY = F)
+# object = cca.unfilter$DNT
+# DefaultAssay(object) = "integrated"
+# object = FindClusters(object, resolution = .02)
+# DimPlot(object)
+save(cca.unfilter, file = "01.cca.unfilter.Rdata")
+```
+```{r modify the metadata}
+meta.all = mapply(function(object){
+  ##### gene expression #####
+  DefaultAssay(object) = "RNA"
+  meta.gene = FetchData(object = object, 
+                        vars = c("Cd3d", "Cd3e", "Cd3g", "Cd4", "Cd8a", "Cd8b1", "Klrb1c"), 
+                        slot = "data") %>%
+    tibble::rownames_to_column("cell.rename")
+  head(meta.gene)
+  ##### save the pre metadata #####
+  metapre = object@meta.data
+  ##### merge pre and modified metadata #####
+  meta.all = metapre %>%
+    tibble::rownames_to_column("cell.rename") %>%
+    dplyr::left_join(x = ., y = meta.gene, by = "cell.rename") %>%
+    tibble::column_to_rownames("cell.rename")
+  head(meta.all)
+  ##### T identity #####
+  if (("Cd4" %in% colnames(meta.all)) == F){
+    meta.all$DNTid = (meta.all$Cd3d > 0 |meta.all$Cd3e > 0| meta.all$Cd3g > 0) &
+      meta.all$Klrb1c == 0 & meta.all$Cd8b1 == 0
+  } else {
+    meta.all$DNTid = (meta.all$Cd3d > 0 |meta.all$Cd3e > 0| meta.all$Cd3g > 0) &
+      meta.all$Cd4 == 0 & meta.all$Klrb1c == 0 & meta.all$Cd8b1 == 0
+  }
+  
+  table(meta.all$DNTid, meta.all$integrated_snn_res.0.05)
+  meta.all$contaminate = meta.all$DNTid == FALSE
+  table(meta.all$contaminate, meta.all$integrated_snn_res.0.05)
+  meta.all$contaminate = factor(meta.all$contaminate, labels = c("kept", "removed"))
+  return(meta.all)
+}, object = cca.unfilter, SIMPLIFY = F)
+save(meta.all, file = "01.cca.unfilter.meta.all.Rdata")
+```
+## markers
+```{r}
+cc.marker = mapply(function(object){
+  print(table(object$seurat_clusters, object$orig.ident))
+  lapply(sort(unique(object$seurat_clusters)), function(i){
+    if (min(table(object$orig.ident[object$seurat_clusters == i])) > 30){
+      FindConservedMarkers(object, ident.1 = i, grouping.var = "orig.ident", 
+                           assay = "RNA", slot = "data", only.pos = T) %>%
+        tibble::rownames_to_column("gene") %>%
+        dplyr::filter(max_pval < .05 & minimump_p_val < .05) %>%
+        dplyr::mutate(cluster = i)
+    }}) %>% 
+    data.table::rbindlist() %>%
+    dplyr::left_join(y = FindAllMarkers(object, assay = "RNA", slot = "data", only.pos = T), by = c("cluster", "gene")) %>%
+    dplyr::group_by(cluster) %>%
+    dplyr::arrange(desc(avg_logFC), .by_group = T)
+}, object = cca.unfilter, SIMPLIFY = F)
+names(cc.marker)
+save(cc.marker, file = "01.cca.unfilter.cc.marker.Rdata")
+```
+
+
+# DoubletFinder and DoubletDecon
+## DoubletDecon use sct results
+```{r}
+source("../26.MAIT/DoubletDecon.f.r")
+############################################################
+# remove doublets using DoubletDecon, dataset need to be clustered first, must have more than two clusters, the plot window should be the maximized.
+############################################################
+dev.off()
+object = lapply(sct.kept[5:6], function(i){
+  i = i %>% 
+    RunPCA() %>% 
+    RunUMAP(dims = 1:30) %>% 
+    FindNeighbors() %>% 
+    FindClusters(resolution = .1)})
+nDNT.decon = mapply(DoubletDecon.f, 
+                    object = object, 
+                    filename = c("nDNT_rep1.sct", "nDNT_rep2.sct"), 
+                    rhop = 1,
+                    SIMPLIFY = F)
+save(nDNT.decon, file = "01.nDNT.decon.Rdata")
+```
+## DoubletFinder union Decon use sct results
+```{r}
+source("../26.MAIT/DoubletFinder.f.r")
+doublet.finder.res = mapply(DoubletFinder.f, object = nDNT.decon, SIMPLIFY = F)
+save(doublet.finder.res, file = "01.DoubletDecon.DoubletFinder.Rdata")
+```
+
