@@ -1,0 +1,43 @@
+# ===== R / RStudio =====
+.Rhistory
+.Rapp.history
+.RData
+.Ruserdata
+.Rproj.user/
+
+# ===== OS files =====
+.DS_Store
+Thumbs.db
+
+# ===== Build / check =====
+*.tar.gz
+*.Rcheck/
+
+# ===== Quarto / R Markdown =====
+*_cache/
+.cache/
+.quarto/
+
+# ===== renv =====
+renv/library/
+renv/python/
+
+# ===== Logs =====
+*.log
+
+# ===== Analysis outputs =====
+output/
+results/
+cache/
+tmp/
+
+# ===== Large data objects =====
+*.rds
+*.rda
+*.h5
+*.h5ad
+*.loom
+
+# ===== Optional: raw / intermediate data =====
+data/raw/
+data/intermediate/
